@@ -1,0 +1,221 @@
+import pandas as pd
+import pyspark.sql.functions as F
+from pyspark.sql.types import *
+from pyspark.sql.window import Window
+from pyspark.sql import SparkSession
+
+df_calls = spark.sql("""
+    SELECT
+        id,
+        Account_vod__c,
+        OwnerId,
+        concat( Year(Call_Date_vod__c), "Q" , quarter(Call_Date_vod__c)) AS quarter,
+        Call_Datetime_vod__c,
+        Call_Type_vod__c,
+        right(MarketCode,2) AS Country,
+        nvs_Call_Type__c,
+        Territory_vod__c,
+        gsk_Samples_Offered__c,
+        Is_Sampled_Call_vod__c
+    FROM epr_stage.fsfa_call
+    WHERE status_vod__c = 'Submitted_vod'
+      AND Call_Date_vod__c >= '2024-01-01 00:00:00.0000000'
+      AND IsDeleted = 'False'
+""").toPandas()
+
+from datetime import timedelta
+df_calls['call_date'] = pd.to_datetime(df_calls['Call_Datetime_vod__c'])
+df_calls['l30_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=30))
+df_calls['l60_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=60))
+df_calls['l90_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=70))
+
+df_calls.head()
+
+# Convert boolean columns to int for faster sum
+bool_cols = ['l30_days_call', 'l60_days_call', 'l90_days_call', 'Is_Sampled_Call_vod__c']
+df_calls[bool_cols] = df_calls[bool_cols].replace({'True': 1, 'False': 0}).astype(int)
+
+# Group and aggregate using built-in sum
+df_call = df_calls.groupby(['Account_vod__c', 'quarter', 'Country']).agg(
+    total_calls=('id', 'nunique'),
+    calls_l30_days=('l30_days_call', 'sum'),
+    calls_l60_days=('l60_days_call', 'sum'),
+    calls_l90_days=('l90_days_call', 'sum'),
+    calls_with_sample=('Is_Sampled_Call_vod__c', 'sum')
+).reset_index()
+df_call.head(100)
+
+
+
+from pyspark.sql import SparkSession
+df_emails = spark.sql("""
+                        SELECT  
+                        Account_vod__c,
+                        Id, 
+                        Clicked_vod__c, 
+                        Opened_vod__c, 
+                        concat( Year(Email_Sent_Date_vod__c), "Q" , quarter(Email_Sent_Date_vod__c)) AS quarter,
+                        IsDeleted, 
+                        right(MarketCode,2) as Country, 
+                        Status_vod__c
+                        from epr_stage.fsfa_sentemail
+                        where RIGHT(MarketCode, 2) = 'EG'
+                        and Email_Sent_Date_vod__c >= '2024-01-01 00:00:00.0000000'
+                        and IsDeleted = 'False'
+                        and Status_vod__c = 'Delivered_vod'
+                        """).toPandas()
+df_emails
+
+df_emails['Clicked_vod__c'] =  df_emails['Clicked_vod__c'].astype(int)
+df_emails['Opened_vod__c'] =  df_emails['Opened_vod__c'].astype(int)
+
+
+df_email = df_emails.groupby(['Account_vod__c', 'quarter', 'Country']).agg(
+    total_emails = ('Id', 'nunique'),
+    clicked_emails = ('Clicked_vod__c', 'sum'),
+    opened_emails = ('Opened_vod__c', 'sum')
+)
+
+df_email['Email_CTR'] = (df_email['clicked_emails'] / df_email['opened_emails']).fillna(0)
+df_email
+
+
+from pyspark.sql import SparkSession
+df_msg = spark.sql("""
+                        SELECT Account_vod__c, 
+                        Id, 
+                        right(MarketCode,2) as Country, 
+                        concat(Year(Capture_Datetime_vod__c), "Q" , quarter(Capture_Datetime_vod__c)) As quarter,     
+                        Clicked_vod__c, 
+                        Opened_vod__c, 
+                        Status_vod__c, 
+                        Transaction_Type_vod__c
+                        from epr_stage.fsfa_sent_message
+                        where RIGHT(MarketCode, 2) = 'EG'
+                        and Capture_Datetime_vod__c >= '2024-01-01 00:00:00.0000000'
+                        --and Status_vod__c = 'Delivered_vod'
+                        """).toPandas()
+df_msg.head()
+
+df_msg['Clicked_vod__c'] =  df_msg['Clicked_vod__c'].astype(int)
+
+df_msg = df_msg.groupby(['Account_vod__c', 'quarter', 'Country']).agg(
+    total_messages = ('Id', 'nunique'),
+    clicked_messages = ('Clicked_vod__c', 'sum')
+)
+df_msg['Msg_CTR'] = (df_msg['clicked_messages'] / df_msg['total_messages']).fillna(0)
+df_msg
+
+
+
+import numpy as np
+
+df_final = df_call.merge(df_email, on = ['Account_vod__c','Country', 'quarter'], how = 'left')
+df_final = df_final.merge(df_msg, on = ['Account_vod__c','Country', 'quarter'], how = 'left')
+df_final['Recommendation'] = np.random.choice(['1','0'], size = len(df_final))
+df_final = df_final.reset_index(drop= False)
+df_final = df_final.fillna(0)
+df_final 
+
+
+
+
+
+# cols_to_drop = ['calls_with_sample', 'CTR_x', 'CTR_y']
+# existing_cols = [col for col in cols_to_drop if col in df_final.columns]
+
+df_final['PES'] = (
+    df_final['total_calls'] * 0.6 +
+    df_final['total_emails'] * 0.2 +
+    df_final['opened_emails'] * 0.3 +
+    df_final['clicked_emails'] * 0.5 +
+    df_final['total_messages'] * 0.2 +
+    df_final['clicked_messages'] * 0.5
+)
+
+Map = spark.sql("""
+                   Select distinct
+                   Market
+                   ,country_code_2d
+                   from
+                   epr_stage.country_mapping
+                   """).toPandas()
+
+
+df_final = df_final.merge(Map, left_on = 'Country', right_on = 'country_code_2d', how = 'left')
+
+# df_final = df_final.drop(existing_cols, axis=1)
+df_final
+
+
+
+
+reps = spark.sql("""
+                 Select a.Account_vod__c
+                 ,d.Name
+                 from
+                 (Select distinct Account_vod__c
+                 from epr_stage.fsfa_call) as a
+
+                 left join 
+
+                 (Select c.Account_vod__c
+                 ,usr.name
+                 from
+
+                 (Select Account_vod__c, ownerId, row_num
+                 from 
+                 (Select distinct Account_vod__c, ownerId
+                 ,row_number() over (partition by Account_vod__c order by Call_Datetime_vod__c) as row_num
+                 from epr_stage.fsfa_call) as b
+                 where row_num = 1) as c
+                 
+                 left join (Select Name, id from epr_stage.fsfa_user) as usr
+                 on c.ownerId = usr.id
+                 ) 
+                 as d
+
+                 on a.Account_vod__c = d.Account_vod__c
+                 """).toPandas()
+reps.display()
+            
+
+
+
+
+
+df_summary = df_final.pivot_table(index=['Market', 'Country'], columns='quarter', values='PES', aggfunc='mean').fillna(0).round(2)
+df_summary
+
+
+
+
+df_reps = df_final.pivot_table(index=['Market', 'Country', 'Name'], columns='quarter', values='PES', aggfunc='mean').fillna(0).round(2)
+df_reps
+
+
+
+from matplotlib import pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+plt.figure(figsize=(10, 6))
+sns.heatmap(df_summary, annot=True, cmap='YlGnBu', fmt='.2f')
+plt.show()
+
+
+
+for country in df_reps.index.get_level_values('Country').unique():
+    data = df_reps.xs(country, level='Country')
+    rows, cols = data.shape
+    
+    # Dynamic scaling with upper and lower bounds
+    height = min(max(4, rows * 0.3), 12)  # min 4, max 12 inches
+    width = min(max(6, cols * 0.5), 14)   # min 6, max 14 inches
+    
+    plt.figure(figsize=(width, height))
+    sns.heatmap(data, annot=True, cmap='YlGnBu', fmt='.2f')
+    plt.title(f'Heatmap for {country}')
+    plt.xticks(rotation=45, fontsize=8)
+    plt.yticks(rotation=0, fontsize=8)
+    plt.show()
