@@ -1,7 +1,9 @@
 # 📊 Customer Profiling & Engagement Scoring (PES)
 
 This project builds a **Customer Profiling System** using **Salesforce Veeva CRM data**.  
-It extracts **call activity**, **email interactions**, and **FSFA message engagement** to calculate a unified **Physician Engagement Score (PES)** at **Account, Country, Quarter, and Representative** level.
+It extracts **call activity**, **email interactions**, and **FSFA message engagement** to calculate a unified **Physician Engagement Score (PES)** at **Account, Country, Quarter, and Sales Representative** level.
+
+The purpose of this project is to understand how engaged each market is by combining different interaction channels into one engagement score. I also created deeper, more detailed reports so teams can quickly take the right actions whenever a market shows higher or lower engagement.
 
 The workflow uses **PySpark for querying**, **Pandas for transformations**, and **Matplotlib/Seaborn for visualization**.
 
